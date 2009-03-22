@@ -52,11 +52,38 @@ struct vout_sys_t
 {
   unsigned char* buffer;
 
+  guint idle_count;
+
   ClutterTexture* texture;
   guint texture_width;
   guint texture_height;
   guint texture_bpp;
 };
+
+
+static gboolean vlc_vout_clutter_update_frame(gpointer data)
+{
+  vout_thread_t* vout_thread;
+
+  vout_thread = data;
+
+  if (vout_thread->p_sys->texture && vout_thread->p_sys->buffer)
+    {
+      clutter_texture_set_from_rgb_data(vout_thread->p_sys->texture,
+					(const guchar *)vout_thread->p_sys->buffer,
+					FALSE,
+					vout_thread->p_sys->texture_width,
+					vout_thread->p_sys->texture_height,
+					vout_thread->p_sys->texture_width * vout_thread->p_sys->texture_bpp,
+					vout_thread->p_sys->texture_bpp,
+					CLUTTER_TEXTURE_RGB_FLAG_BGR,
+					NULL);
+    }
+
+  --vout_thread->p_sys->idle_count;
+
+  return FALSE;
+}
 
 
 static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
@@ -99,7 +126,10 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
 				      vout_thread->p_sys->texture_bpp);
   if (vout_thread->p_sys->buffer == NULL)
     {
-      msg_Warn(vout_thread, "Unable to allocate buffer[0]");
+      g_object_unref(vout_thread->p_sys->texture);
+      vout_thread->p_sys->texture = NULL;
+
+      msg_Err(vout_thread, "Unable to allocate buffer[0]");
       return VLC_ENOMEM;
     }
 
@@ -125,6 +155,11 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
 
 static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
 {
+  while (vout_thread->p_sys->idle_count > 0)
+    ;
+
+  clutter_threads_enter();
+
   if (vout_thread->p_sys->buffer)
     {
       free(vout_thread->p_sys->buffer);
@@ -136,37 +171,15 @@ static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
       g_object_unref(vout_thread->p_sys->texture);
       vout_thread->p_sys->texture = NULL;
     }
-}
 
-
-static gboolean vlc_vout_clutter_update_frame(gpointer data)
-{
-  vout_thread_t* vout_thread;
-
-  /* race here if vout threads end / destroy before idle is called
-   */
-
-  vout_thread = data;
-
-  if (vout_thread->p_sys->texture && vout_thread->p_sys->buffer)
-    {
-      clutter_texture_set_from_rgb_data(vout_thread->p_sys->texture,
-					(const guchar *)vout_thread->p_sys->buffer,
-					FALSE,
-					vout_thread->p_sys->texture_width,
-					vout_thread->p_sys->texture_height,
-					vout_thread->p_sys->texture_width * vout_thread->p_sys->texture_bpp,
-					vout_thread->p_sys->texture_bpp,
-					CLUTTER_TEXTURE_RGB_FLAG_BGR,
-					NULL);
-    }
-
-  return FALSE;
+  clutter_threads_leave();
 }
 
 
 static void vlc_vout_clutter_display(vout_thread_t* vout_thread, picture_t* picture)
 {
+  ++vout_thread->p_sys->idle_count;
+
   clutter_threads_add_idle_full(G_PRIORITY_HIGH_IDLE,
 				vlc_vout_clutter_update_frame,
 				vout_thread,
@@ -183,6 +196,8 @@ static int vlc_vout_clutter_create(vlc_object_t* vlc_object)
   vout_thread->p_sys = malloc(sizeof(vout_sys_t));
   if (vout_thread->p_sys == NULL)
     return VLC_ENOMEM;
+
+  memset(vout_thread->p_sys, 0, sizeof(vout_sys_t));
 
   vout_thread->pf_init = vlc_vout_clutter_init;
   vout_thread->pf_end = vlc_vout_clutter_end;
