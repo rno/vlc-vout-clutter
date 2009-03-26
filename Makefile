@@ -1,6 +1,6 @@
 
 libdir = $(shell pkg-config --variable=libdir vlc-plugin )
-vlclibdir = $(libdir)/vlc
+vlclibdir = $(libdir)/vlc/video_output
 
 all: libclutter_plugin.so
 
