@@ -50,9 +50,9 @@ vlc_module_end ()
 
 struct vout_sys_t
 {
-  unsigned char* buffer;
+  volatile guint ref_count;
 
-  guint idle_count;
+  unsigned char* buffer;
 
   ClutterTexture* texture;
   guint texture_width;
@@ -80,7 +80,7 @@ static gboolean vlc_vout_clutter_update_frame(gpointer data)
 					NULL);
     }
 
-  --vout_thread->p_sys->idle_count;
+  g_atomic_int_add(&vout_thread->p_sys->ref_count, -1);
 
   return FALSE;
 }
@@ -155,7 +155,7 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
 
 static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
 {
-  while (vout_thread->p_sys->idle_count > 0)
+  while (g_atomic_int_get(&vout_thread->p_sys->ref_count) > 1)
     ;
 
   clutter_threads_enter();
@@ -178,7 +178,7 @@ static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
 
 static void vlc_vout_clutter_display(vout_thread_t* vout_thread, picture_t* picture)
 {
-  ++vout_thread->p_sys->idle_count;
+  g_atomic_int_add(&vout_thread->p_sys->ref_count, 1);
 
   clutter_threads_add_idle_full(G_PRIORITY_HIGH_IDLE,
 				vlc_vout_clutter_update_frame,
@@ -198,6 +198,8 @@ static int vlc_vout_clutter_create(vlc_object_t* vlc_object)
     return VLC_ENOMEM;
 
   memset(vout_thread->p_sys, 0, sizeof(vout_sys_t));
+
+  vout_thread->p_sys->ref_count = 1;
 
   vout_thread->pf_init = vlc_vout_clutter_init;
   vout_thread->pf_end = vlc_vout_clutter_end;
