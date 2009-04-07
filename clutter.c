@@ -52,6 +52,10 @@ struct vout_sys_t
 {
   volatile guint ref_count;
 
+  volatile guint buffer_ready;
+
+  volatile guint idle_id;
+
   unsigned char* buffer;
 
   ClutterTexture* texture;
@@ -67,6 +71,9 @@ static gboolean vlc_vout_clutter_update_frame(gpointer data)
 
   vout_thread = data;
 
+  while (g_atomic_int_get(&vout_thread->p_sys->buffer_ready) == 0)
+    ;
+
   if (vout_thread->p_sys->texture && vout_thread->p_sys->buffer)
     {
       clutter_texture_set_from_rgb_data(vout_thread->p_sys->texture,
@@ -80,6 +87,8 @@ static gboolean vlc_vout_clutter_update_frame(gpointer data)
 					NULL);
     }
 
+  g_atomic_int_set(&vout_thread->p_sys->buffer_ready, 0);
+  g_atomic_int_set(&vout_thread->p_sys->idle_id, 0);
   g_atomic_int_add(&vout_thread->p_sys->ref_count, -1);
 
   return FALSE;
@@ -155,10 +164,18 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
 
 static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
 {
-  while (g_atomic_int_get(&vout_thread->p_sys->ref_count) > 1)
-    ;
+  gint try;
 
-  clutter_threads_enter();
+  for (try = 0; try < 3; ++try)
+    if (g_atomic_int_get(&vout_thread->p_sys->ref_count) == 1)
+      break;
+
+  if (g_atomic_int_get(&vout_thread->p_sys->ref_count) > 1
+      && g_atomic_int_get(&vout_thread->p_sys->idle_id) != 0)
+    {
+      g_source_remove(vout_thread->p_sys->idle_id);
+      vout_thread->p_sys->idle_id = 0;
+    }
 
   if (vout_thread->p_sys->buffer)
     {
@@ -171,19 +188,23 @@ static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
       g_object_unref(vout_thread->p_sys->texture);
       vout_thread->p_sys->texture = NULL;
     }
-
-  clutter_threads_leave();
 }
 
 
 static void vlc_vout_clutter_display(vout_thread_t* vout_thread, picture_t* picture)
 {
+  if (g_atomic_int_get(&vout_thread->p_sys->idle_id) != 0)
+    return;
+
   g_atomic_int_add(&vout_thread->p_sys->ref_count, 1);
 
-  clutter_threads_add_idle_full(G_PRIORITY_HIGH_IDLE,
-				vlc_vout_clutter_update_frame,
-				vout_thread,
-				NULL);
+  g_atomic_int_set(&vout_thread->p_sys->idle_id,
+		   clutter_threads_add_idle_full(G_PRIORITY_HIGH_IDLE,
+						 vlc_vout_clutter_update_frame,
+						 vout_thread,
+						 NULL));
+
+  g_atomic_int_set(&vout_thread->p_sys->buffer_ready, 1);
 }
 
 
