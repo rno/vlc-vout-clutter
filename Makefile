@@ -5,10 +5,10 @@ vlclibdir = $(libdir)/vlc/video_output
 all: libclutter_plugin.so
 
 libclutter_plugin.so: libclutter_plugin.o
-	gcc -shared -std=gnu99 $< `pkg-config  --libs vlc-plugin clutter-0.9`  -Wl,-soname -Wl,$@ -o $@
+	gcc -shared -std=gnu99 $< `pkg-config  --libs vlc-plugin clutter-0.8`  -Wl,-soname -Wl,$@ -o $@
 
 libclutter_plugin.o: clutter.c
-	gcc -c -std=gnu99  $< `pkg-config  --cflags vlc-plugin clutter-0.9` -D__PLUGIN__  -DMODULE_STRING=\"clutter\" -o $@
+	gcc -c -std=gnu99  $< `pkg-config  --cflags vlc-plugin clutter-0.8` -D__PLUGIN__  -DMODULE_STRING=\"clutter\" -o $@
 
 clean:
 	rm -f libclutter_plugin.o libclutter_plugin.so

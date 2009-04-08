@@ -52,6 +52,8 @@ struct vout_sys_t
 {
   volatile guint ref_count;
 
+  GAsyncQueue* async_queue;
+
   unsigned char* buffer;
 
   ClutterTexture* texture;
@@ -64,10 +66,12 @@ struct vout_sys_t
 static gboolean vlc_vout_clutter_update_frame(gpointer data)
 {
   vout_thread_t* vout_thread;
+  unsigned char* buffer;
 
   vout_thread = data;
+  buffer = g_async_queue_try_pop(vout_thread->p_sys->async_queue);
 
-  if (vout_thread->p_sys->texture && vout_thread->p_sys->buffer)
+  if (buffer != NULL && vout_thread->p_sys->texture && vout_thread->p_sys->buffer)
     {
       clutter_texture_set_from_rgb_data(vout_thread->p_sys->texture,
 					(const guchar *)vout_thread->p_sys->buffer,
@@ -155,10 +159,20 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
 
 static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
 {
+  unsigned char* buffer;
+
+  g_async_queue_lock(vout_thread->p_sys->async_queue);
+
+  do
+    {
+      buffer = g_async_queue_try_pop_unlocked(vout_thread->p_sys->async_queue);
+
+    } while (buffer != NULL);
+
+  g_async_queue_unlock(vout_thread->p_sys->async_queue);
+
   while (g_atomic_int_get(&vout_thread->p_sys->ref_count) > 1)
     ;
-
-  clutter_threads_enter();
 
   if (vout_thread->p_sys->buffer)
     {
@@ -171,14 +185,15 @@ static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
       g_object_unref(vout_thread->p_sys->texture);
       vout_thread->p_sys->texture = NULL;
     }
-
-  clutter_threads_leave();
 }
 
 
 static void vlc_vout_clutter_display(vout_thread_t* vout_thread, picture_t* picture)
 {
   g_atomic_int_add(&vout_thread->p_sys->ref_count, 1);
+
+  g_async_queue_push(vout_thread->p_sys->async_queue,
+		     vout_thread->p_sys->buffer);
 
   clutter_threads_add_idle_full(G_PRIORITY_HIGH_IDLE,
 				vlc_vout_clutter_update_frame,
@@ -199,6 +214,7 @@ static int vlc_vout_clutter_create(vlc_object_t* vlc_object)
 
   memset(vout_thread->p_sys, 0, sizeof(vout_sys_t));
 
+  vout_thread->p_sys->async_queue = g_async_queue_new();
   vout_thread->p_sys->ref_count = 1;
 
   vout_thread->pf_init = vlc_vout_clutter_init;

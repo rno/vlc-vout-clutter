@@ -1,4 +1,4 @@
 Installation Instructions
 *************************
 
-Well for now just type: make
+Well for now just type: make and sudo make install
