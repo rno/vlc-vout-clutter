@@ -50,9 +50,9 @@ vlc_module_end ()
 
 struct vout_sys_t
 {
-  volatile guint ref_count;
+  pthread_mutex_t mutex;
 
-  GAsyncQueue* async_queue;
+  guint ref_count;
 
   unsigned char* buffer;
 
@@ -60,37 +60,77 @@ struct vout_sys_t
   guint texture_width;
   guint texture_height;
   guint texture_bpp;
+  guint texture_rowstride;
 };
 
 
-static gboolean vlc_vout_clutter_update_frame(gpointer data)
+static void
+vlc_vout_clutter_context_ref(vout_sys_t* context)
 {
-  vout_thread_t* vout_thread;
-  unsigned char* buffer;
+  pthread_mutex_lock(&context->mutex);
 
-  vout_thread = data;
-  buffer = g_async_queue_try_pop(vout_thread->p_sys->async_queue);
+  ++context->ref_count;
 
-  if (buffer != NULL && vout_thread->p_sys->texture && vout_thread->p_sys->buffer)
+  pthread_mutex_unlock(&context->mutex);
+}
+
+
+static void
+vlc_vout_clutter_context_unref(vout_sys_t* context)
+{
+  gboolean should_destroy;
+
+  pthread_mutex_lock(&context->mutex);
+
+  --context->ref_count;
+
+  if (context->ref_count == 1)
+    should_destroy = TRUE;
+  else
+    should_destroy = FALSE;
+
+  pthread_mutex_unlock(&context->mutex);
+
+  if (should_destroy == TRUE)
     {
-      clutter_texture_set_from_rgb_data(vout_thread->p_sys->texture,
-					(const guchar *)vout_thread->p_sys->buffer,
-					FALSE,
-					vout_thread->p_sys->texture_width,
-					vout_thread->p_sys->texture_height,
-					vout_thread->p_sys->texture_width * vout_thread->p_sys->texture_bpp,
-					vout_thread->p_sys->texture_bpp,
-					CLUTTER_TEXTURE_RGB_FLAG_BGR,
-					NULL);
-    }
+      pthread_mutex_destroy(&context->mutex);
 
-  g_atomic_int_add(&vout_thread->p_sys->ref_count, -1);
+      if (context->texture != NULL)
+	g_object_unref(context->texture);
+
+      if (context->buffer != NULL)
+	free(context->buffer);
+
+      free(context);
+    }
+}
+
+
+static gboolean
+vlc_vout_clutter_update_frame(gpointer data)
+{
+  vout_sys_t* context;
+
+  context = data;
+
+  clutter_texture_set_from_rgb_data(context->texture,
+				    (const guchar *)context->buffer,
+				    FALSE,
+				    context->texture_width,
+				    context->texture_height,
+				    context->texture_rowstride,
+				    context->texture_bpp,
+				    CLUTTER_TEXTURE_RGB_FLAG_BGR,
+				    NULL);
+
+  vlc_vout_clutter_context_unref(context);
 
   return FALSE;
 }
 
 
-static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
+static int
+vlc_vout_clutter_init(vout_thread_t* vout_thread)
 {
   char* tmp;
 
@@ -105,8 +145,6 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
       return VLC_EGENERIC;
     }
 
-  /* race here
-   */
   g_object_ref(vout_thread->p_sys->texture);
 
   /* TODO: may change according to cogl support
@@ -119,6 +157,8 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
 
   vout_thread->p_sys->texture_width = vout_thread->render.i_width;
   vout_thread->p_sys->texture_height = vout_thread->render.i_height;
+  vout_thread->p_sys->texture_rowstride =
+    vout_thread->p_sys->texture_width * vout_thread->p_sys->texture_bpp;
 
   vout_thread->output.i_width = vout_thread->p_sys->texture_width;
   vout_thread->output.i_height = vout_thread->p_sys->texture_height;
@@ -142,8 +182,10 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
   vout_thread->p_picture[0].p->i_lines = vout_thread->output.i_height;
   vout_thread->p_picture[0].p->i_visible_lines = vout_thread->output.i_height;
   vout_thread->p_picture[0].p->i_pixel_pitch = vout_thread->p_sys->texture_bpp;
-  vout_thread->p_picture[0].p->i_pitch = vout_thread->output.i_width * vout_thread->p_picture[0].p->i_pixel_pitch;
-  vout_thread->p_picture[0].p->i_visible_pitch = vout_thread->output.i_width * vout_thread->p_picture[0].p->i_pixel_pitch;
+  vout_thread->p_picture[0].p->i_pitch =
+    vout_thread->output.i_width * vout_thread->p_picture[0].p->i_pixel_pitch;
+  vout_thread->p_picture[0].p->i_visible_pitch =
+    vout_thread->output.i_width * vout_thread->p_picture[0].p->i_pixel_pitch;
   vout_thread->p_picture[0].i_status = DESTROYED_PICTURE;
   vout_thread->p_picture[0].i_type = DIRECT_PICTURE;
 
@@ -153,56 +195,33 @@ static int vlc_vout_clutter_init(vout_thread_t* vout_thread)
   vout_thread->output.pp_picture[0] = &vout_thread->p_picture[0];
   vout_thread->output.i_pictures = 1;
 
+  vlc_vout_clutter_context_ref(vout_thread->p_sys);
+
   return VLC_SUCCESS;
 }
 
 
-static void vlc_vout_clutter_end(vout_thread_t* vout_thread)
+static void
+vlc_vout_clutter_end(vout_thread_t* vout_thread)
 {
-  unsigned char* buffer;
-
-  g_async_queue_lock(vout_thread->p_sys->async_queue);
-
-  do
-    {
-      buffer = g_async_queue_try_pop_unlocked(vout_thread->p_sys->async_queue);
-
-    } while (buffer != NULL);
-
-  g_async_queue_unlock(vout_thread->p_sys->async_queue);
-
-  while (g_atomic_int_get(&vout_thread->p_sys->ref_count) > 1)
-    ;
-
-  if (vout_thread->p_sys->buffer)
-    {
-      free(vout_thread->p_sys->buffer);
-      vout_thread->p_sys->buffer = NULL;
-    }
-
-  if (vout_thread->p_sys->texture)
-    {
-      g_object_unref(vout_thread->p_sys->texture);
-      vout_thread->p_sys->texture = NULL;
-    }
+  vlc_vout_clutter_context_unref(vout_thread->p_sys);
 }
 
 
-static void vlc_vout_clutter_display(vout_thread_t* vout_thread, picture_t* picture)
+static void
+vlc_vout_clutter_display(vout_thread_t* vout_thread, picture_t* picture)
 {
-  g_atomic_int_add(&vout_thread->p_sys->ref_count, 1);
-
-  g_async_queue_push(vout_thread->p_sys->async_queue,
-		     vout_thread->p_sys->buffer);
+  vlc_vout_clutter_context_ref(vout_thread->p_sys);
 
   clutter_threads_add_idle_full(G_PRIORITY_HIGH_IDLE,
 				vlc_vout_clutter_update_frame,
-				vout_thread,
+				vout_thread->p_sys,
 				NULL);
 }
 
 
-static int vlc_vout_clutter_create(vlc_object_t* vlc_object)
+static int
+vlc_vout_clutter_create(vlc_object_t* vlc_object)
 {
   vout_thread_t* vout_thread;
 
@@ -214,8 +233,10 @@ static int vlc_vout_clutter_create(vlc_object_t* vlc_object)
 
   memset(vout_thread->p_sys, 0, sizeof(vout_sys_t));
 
-  vout_thread->p_sys->async_queue = g_async_queue_new();
+  pthread_mutex_init(&vout_thread->p_sys->mutex, NULL);
   vout_thread->p_sys->ref_count = 1;
+
+  vlc_vout_clutter_context_ref(vout_thread->p_sys);
 
   vout_thread->pf_init = vlc_vout_clutter_init;
   vout_thread->pf_end = vlc_vout_clutter_end;
@@ -225,12 +246,12 @@ static int vlc_vout_clutter_create(vlc_object_t* vlc_object)
 }
 
 
-static void vlc_vout_clutter_destroy(vlc_object_t* vlc_object)
+static void
+vlc_vout_clutter_destroy(vlc_object_t* vlc_object)
 {
   vout_thread_t* vout_thread;
 
   vout_thread = (vout_thread_t *)vlc_object;
 
-  free(vout_thread->p_sys);
-  vout_thread->p_sys = NULL;
+  vlc_vout_clutter_context_unref(vout_thread->p_sys);
 }
