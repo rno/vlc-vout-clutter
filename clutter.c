@@ -48,11 +48,24 @@ vlc_module_begin ()
     set_callbacks( vlc_vout_clutter_create, vlc_vout_clutter_destroy )
 vlc_module_end ()
 
+
+typedef enum
+{
+  CLUTTER_VLC_NOFORMAT,
+  CLUTTER_VLC_RGB32,
+  CLUTTER_VLC_RGB24,
+  CLUTTER_VLC_AYUV,
+  CLUTTER_VLC_YV12,
+
+} ClutterVlcVideoFormat;
+
+
 struct vout_sys_t
 {
   pthread_mutex_t mutex;
-
   guint ref_count;
+
+  ClutterVlcVideoFormat format;
 
   unsigned char* buffer;
 
@@ -147,12 +160,46 @@ vlc_vout_clutter_init(vout_thread_t* vout_thread)
 
   g_object_ref(vout_thread->p_sys->texture);
 
+
+
+  printf("[?] %s: shaders GLSL available %s\n", __FUNCTION__,
+	 (cogl_features_available(COGL_FEATURE_SHADERS_GLSL) ? "TRUE" : "FALSE"));
+
+
+
+  switch (vout_thread->render.i_chroma)
+    {
+    case VLC_FOURCC('Y', 'V', '1', '2'):
+    case VLC_FOURCC('I', '4', '2', '0'):
+    case VLC_FOURCC('I', 'Y', 'U', 'V'):
+      vout_thread->p_sys->format = CLUTTER_VLC_YV12;
+      vout_thread->output.i_chroma = VLC_FOURCC('Y', 'V', '1', '2');
+      vout_thread->p_sys->texture_bpp = 4;
+      break;
+
+    case VLC_FOURCC('R', 'V', '2', '4'):
+      vout_thread->output.i_chroma = VLC_FOURCC('R', 'V', '2', '4');
+      vout_thread->output.i_rmask = 0xff0000;
+      vout_thread->output.i_gmask = 0x00ff00;
+      vout_thread->output.i_bmask = 0x0000ff;
+      vout_thread->p_sys->texture_bpp = 3;
+      break;
+
+    case VLC_FOURCC('A', 'Y', 'U', 'V'):
+    case VLC_FOURCC('R', 'V', '3', '2'):
+      vout_thread->output.i_chroma = VLC_FOURCC('R', 'V', '3', '2');
+      vout_thread->p_sys->texture_bpp = 4;
+      break;
+
+    default:
+      vout_thread->output.i_chroma = VLC_FOURCC('R', 'V', '2', '4');
+      break;
+    }
+
+
+
   /* TODO: may change according to cogl support
    */
-  vout_thread->output.i_chroma = VLC_FOURCC('R', 'V', '2', '4');
-  vout_thread->output.i_rmask = 0xff0000;
-  vout_thread->output.i_gmask = 0x00ff00;
-  vout_thread->output.i_bmask = 0x0000ff;
   vout_thread->p_sys->texture_bpp = 3;
 
   vout_thread->p_sys->texture_width = vout_thread->render.i_width;
